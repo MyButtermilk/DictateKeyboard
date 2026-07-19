@@ -187,9 +187,16 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
     }
 
     /** Context-score function for [correctionsFor]: boosts candidates that commonly follow [prevWord]. */
-    private fun bigramContextScore(prevWord: String?, bigrams: Map<String, Long>): (String) -> Double {
+    private fun bigramContextScore(
+        prevWord: String?,
+        bigrams: Map<String, Long>,
+        candidateNormalizer: (String) -> String = { it },
+    ): (String) -> Double {
         if (prevWord == null || bigrams.isEmpty()) return { 0.0 }
-        return { cand -> CONTEXT_WEIGHT * ln(((bigrams["$prevWord $cand"] ?: 0L) + 1L).toDouble()) }
+        return { cand ->
+            val normalizedCandidate = candidateNormalizer(cand)
+            CONTEXT_WEIGHT * ln(((bigrams["$prevWord $normalizedCandidate"] ?: 0L) + 1L).toDouble())
+        }
     }
 
     /** Frequency-sorted (descending) word list for [subtype]'s dictionary language, cached per language. */
@@ -216,6 +223,10 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         val freq: Map<String, Int>,
         val canonical: Map<String, String>,
         val alphabet: Set<Char>,
+        // Standard-German ß entries exposed as Swiss ss aliases, including the original key for bigrams.
+        val swissFreq: Map<String, Int>,
+        val swissCanonical: Map<String, String>,
+        val swissSource: Map<String, String>,
     )
 
     private val lowerIndexByLang = guardedByLock { mutableMapOf<String, LowerIndex>() }
@@ -245,15 +256,27 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
                 val freq = HashMap<String, Int>(data.size)
                 val canonical = HashMap<String, String>(data.size)
                 val alphabet = HashSet<Char>()
+                val swissFreq = HashMap<String, Int>()
+                val swissCanonical = HashMap<String, String>()
+                val swissSource = HashMap<String, String>()
                 for ((word, f) in data) {
                     val lower = word.lowercase()
                     if ((freq[lower] ?: -1) < f) {
                         freq[lower] = f
                         canonical[lower] = word
                     }
+                    if (lang == "de" && 'ß' in lower) {
+                        val swissLower = GermanOrthography.toSwissSpelling(lower)
+                        if ((swissFreq[swissLower] ?: -1) < f) {
+                            swissFreq[swissLower] = f
+                            swissCanonical[swissLower] = GermanOrthography.toSwissSpelling(word)
+                            swissSource[swissLower] = lower
+                        }
+                    }
                     for (ch in lower) if (ch.isLetter()) alphabet.add(ch)
                 }
-                LowerIndex(freq, canonical, alphabet).also { cache[lang] = it }
+                LowerIndex(freq, canonical, alphabet, swissFreq, swissCanonical, swissSource)
+                    .also { cache[lang] = it }
             }
         }
     }
@@ -280,6 +303,49 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         return isInUserDictionary(word, subtype)
     }
 
+    private fun isGermanSubtype(subtype: Subtype): Boolean =
+        GermanOrthography.appliesTo(normalizeLang(subtype.primaryLocale.language))
+
+    private fun isSwissGerman(subtype: Subtype): Boolean =
+        isGermanSubtype(subtype) && !GermanOrthography.allowsSharpS(subtype.primaryLocale.country)
+
+    private fun germanOrthographicEdits(word: String, subtype: Subtype): Map<String, Int> {
+        if (!isGermanSubtype(subtype)) return emptyMap()
+        return GermanOrthography.variants(
+            word,
+            allowSharpS = GermanOrthography.allowsSharpS(subtype.primaryLocale.country),
+        )
+    }
+
+    /** Swiss German writes ss instead of ß; recognize that alias through the standard-German dictionary. */
+    private fun isSwissGermanEquivalentKnown(word: String, subtype: Subtype, index: LowerIndex): Boolean =
+        isSwissGerman(subtype) && index.swissFreq.containsKey(word.lowercase())
+
+    private fun isDictionaryCandidate(candidate: String, index: LowerIndex, subtype: Subtype): Boolean =
+        index.freq.containsKey(candidate) || (isSwissGerman(subtype) && index.swissFreq.containsKey(candidate))
+
+    private fun candidateFrequency(candidate: String, index: LowerIndex, subtype: Subtype): Int =
+        index.freq[candidate] ?: if (isSwissGerman(subtype)) index.swissFreq[candidate] ?: 0 else 0
+
+    private fun canonicalCandidate(candidate: String, index: LowerIndex, subtype: Subtype): String =
+        index.canonical[candidate]
+            ?: if (isSwissGerman(subtype)) index.swissCanonical[candidate] ?: candidate else candidate
+
+    /** Map a Swiss ss alias back to the standard dictionary key used by the downloaded German bigrams. */
+    private fun dictionaryContextForm(word: String, index: LowerIndex, subtype: Subtype): String {
+        val lower = word.lowercase()
+        if (!isSwissGerman(subtype) || index.freq.containsKey(lower)) return lower
+        return index.swissSource[lower] ?: lower
+    }
+
+    /** de-CH must never regain ß, including through the generic edit-distance candidate path. */
+    private fun correctionCandidateAllowed(subtype: Subtype): (String) -> Boolean =
+        if (isSwissGerman(subtype)) {
+            { candidate -> 'ß' !in candidate }
+        } else {
+            { true }
+        }
+
     /** All strings one edit away from [word] (delete / transpose / replace / insert) — Norvig's edits1. */
     private fun edits1(word: String, alphabet: Set<Char>): Set<String> {
         val result = HashSet<String>()
@@ -296,37 +362,89 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         return result
     }
 
-    /** Dictionary words closest to (a misspelling of) [word], ranked by frequency. */
+    /** Dictionary words closest to (a misspelling of) [word], ranked by the noisy-channel model. */
     private fun correctionsFor(
         word: String,
+        subtype: Subtype,
         index: LowerIndex,
         maxCount: Int,
         allowDistance2: Boolean,
         contextScore: (cand: String) -> Double = { 0.0 },
+        orthographicEdits: Map<String, Int> = emptyMap(),
+        candidateAllowed: (String) -> Boolean = { true },
     ): List<String> {
         val lower = word.lowercase()
         val e1 = edits1(lower, index.alphabet)
-        val known = e1.filterTo(LinkedHashSet()) { index.freq.containsKey(it) }
+        val known = e1.filterTo(LinkedHashSet()) {
+            candidateAllowed(it) && isDictionaryCandidate(it, index, subtype)
+        }
+        for (candidate in orthographicEdits.keys) {
+            if (candidateAllowed(candidate) && isDictionaryCandidate(candidate, index, subtype)) {
+                known.add(candidate)
+            }
+        }
         if (known.isEmpty() && allowDistance2) {
             for (e in e1) for (ee in edits1(e, index.alphabet)) {
-                if (index.freq.containsKey(ee)) known.add(ee)
+                if (candidateAllowed(ee) && isDictionaryCandidate(ee, index, subtype)) known.add(ee)
             }
         }
         // Noisy-channel ranking (Tier 1): combine the unigram prior with a keyboard-proximity likelihood,
-        // so a fat-finger substitution of an adjacent key beats a merely more frequent but far-away word,
-        // instead of ranking purely by frequency.
-        return known.sortedByDescending { channelScore(lower, it, index.freq[it] ?: 0, contextScore) }
+        // while German shorthand variants use their lower, explicit omission penalty (issue #219).
+        return known.sortedByDescending {
+            channelScore(
+                typed = lower,
+                cand = it,
+                freq = candidateFrequency(it, index, subtype),
+                contextScore = contextScore,
+                orthographicEditCount = orthographicEdits[it],
+            )
+        }
             .take(maxCount)
-            .map { index.canonical[it] ?: it }
+            .map { canonicalCandidate(it, index, subtype) }
+    }
+
+    /** German orthographic variants only, used even when the typed form is itself a valid dictionary word. */
+    private fun orthographicCorrectionsFor(
+        word: String,
+        subtype: Subtype,
+        index: LowerIndex,
+        maxCount: Int,
+        orthographicEdits: Map<String, Int>,
+        contextScore: (cand: String) -> Double,
+        candidateAllowed: (String) -> Boolean,
+    ): List<String> {
+        val lower = word.lowercase()
+        return orthographicEdits.keys.asSequence()
+            .filter { candidateAllowed(it) && isDictionaryCandidate(it, index, subtype) }
+            .sortedByDescending {
+                channelScore(
+                    typed = lower,
+                    cand = it,
+                    freq = candidateFrequency(it, index, subtype),
+                    contextScore = contextScore,
+                    orthographicEditCount = orthographicEdits[it],
+                )
+            }
+            .take(maxCount)
+            .map { canonicalCandidate(it, index, subtype) }
+            .toList()
     }
 
     /**
      * Noisy-channel score for ranking a correction candidate: log unigram prior + log likelihood that
-     * [typed] is a mis-tap of [cand] given the keyboard geometry (Tier 1) + a context bonus for how often
-     * [cand] follows the previous word (Tier 2 bigram). Higher is better.
+     * [typed] produced [cand] + a context bonus for how often [cand] follows the previous word. Higher is better.
      */
-    private fun channelScore(typed: String, cand: String, freq: Int, contextScore: (String) -> Double): Double =
-        ln((freq + 1).toDouble()) + spatialLogLikelihood(typed, cand) + contextScore(cand)
+    private fun channelScore(
+        typed: String,
+        cand: String,
+        freq: Int,
+        contextScore: (String) -> Double,
+        orthographicEditCount: Int? = null,
+    ): Double {
+        val likelihood = orthographicEditCount?.let(GermanOrthography::logLikelihood)
+            ?: spatialLogLikelihood(typed, cand)
+        return ln((freq + 1).toDouble()) + likelihood + contextScore(cand)
+    }
 
     /**
      * log P(typed | cand): near-key substitutions cost little, far ones a lot (Gaussian over key distance);
@@ -383,7 +501,7 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         // appContext.assets.reader()
         // appContext.assets.bufferedReader()
         // appContext.assets.readText()
-        // To copy an APK file/dir to the file system cache (appContext.cacheDir), the following methods are available:
+        // To copy a file/dir from APK assets to the device's internal storage, the following methods are available:
         // appContext.assets.copy()
         // appContext.assets.copyRecursively()
 
@@ -412,7 +530,8 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         if (trimmed.length <= 1 || trimmed.any { it.isDigit() }) return SpellingResult.validWord()
         val index = lowerIndexFor(subtype)
         // Known in the active language OR any other configured keyboard language (multilingual, #190).
-        if (isKnownWord(trimmed, subtype)) {
+        // Swiss ss spellings are accepted through the German dictionary without ever offering ß back.
+        if (isKnownWord(trimmed, subtype) || isSwissGermanEquivalentKnown(trimmed, subtype, index)) {
             return SpellingResult.validWord()
         }
         // Unknown word → typo, offering the closest dictionary words as corrections (may be empty).
@@ -420,9 +539,20 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         val prevWord = precedingWords.lastOrNull()
             ?.takeLastWhile { it.isLetter() || it == '\'' }?.lowercase()?.takeIf { it.isNotEmpty() }
         val bigrams = if (prevWord != null) bigramsFor(subtype) else emptyMap()
+        val contextScore = bigramContextScore(
+            prevWord = prevWord?.let { dictionaryContextForm(it, index, subtype) },
+            bigrams = bigrams,
+            candidateNormalizer = { dictionaryContextForm(it, index, subtype) },
+        )
         val suggestions = correctionsFor(
-            trimmed, index, maxSuggestionCount, allowDistance2 = true,
-            bigramContextScore(prevWord, bigrams),
+            word = trimmed,
+            subtype = subtype,
+            index = index,
+            maxCount = maxSuggestionCount,
+            allowDistance2 = true,
+            contextScore = contextScore,
+            orthographicEdits = germanOrthographicEdits(trimmed, subtype),
+            candidateAllowed = correctionCandidateAllowed(subtype),
         )
         return SpellingResult.typo(suggestions.toTypedArray())
     }
@@ -449,8 +579,9 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
             }
 
         // Dedup by lowercase key, preserving order: the user's personal dictionary first, then the main
-        // dictionary ranked by frequency.
+        // dictionary ranked by frequency. Standard-German ß entries are rendered with ss for de-CH.
         val out = LinkedHashMap<String, SuggestionCandidate>()
+        val swissGerman = isSwissGerman(subtype)
 
         runCatching {
             val dm = DictionaryManager.default()
@@ -466,8 +597,9 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
         val data = wordDataFor(subtype)
         for (dictWord in rankedWordsFor(subtype)) {
             if (out.size >= maxCandidateCount) break
-            if (!dictWord.startsWith(word, ignoreCase = true)) continue
-            val text = cased(dictWord)
+            val completionWord = if (swissGerman) GermanOrthography.toSwissSpelling(dictWord) else dictWord
+            if (!completionWord.startsWith(word, ignoreCase = true)) continue
+            val text = cased(completionWord)
             out.putIfAbsent(
                 text.lowercase(),
                 WordSuggestionCandidate(
@@ -478,45 +610,98 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
             )
         }
 
-        // Autocorrect: when the composed word isn't a known word and nothing completes it (so it looks
-        // like a finished typo rather than a word in progress), offer the closest dictionary words and mark
-        // the top one for auto-commit — the editor swaps it in on the next space/punctuation. Kept
-        // conservative (edit distance 1, length >= 3) to avoid mangling intentional input.
         val index = lowerIndexFor(subtype)
+        val lowerWord = word.lowercase()
+        val knownInActiveDictionary = isDictionaryCandidate(lowerWord, index, subtype)
         // Don't autocorrect a word that's valid in any of the user's keyboard languages (multilingual, #190).
-        val isKnown = isKnownWord(word, subtype)
-        if (prefs.suggestion.autoCorrect.get() && out.isEmpty() && !isKnown && word.length >= 3) {
+        val isKnown = isKnownWord(word, subtype) || isSwissGermanEquivalentKnown(word, subtype, index)
+        val completionsWereEmpty = out.isEmpty()
+        val orthographicEdits = germanOrthographicEdits(word, subtype)
+        val candidateAllowed = correctionCandidateAllowed(subtype)
+        val hasOrthographicCorrection = orthographicEdits.keys.any {
+            candidateAllowed(it) && isDictionaryCandidate(it, index, subtype)
+        }
+        val shouldTryGenericCorrection = !isKnown && completionsWereEmpty
+
+        if (prefs.suggestion.autoCorrect.get() && word.length >= 3 &&
+            (shouldTryGenericCorrection || hasOrthographicCorrection)
+        ) {
             val prevWord = previousWordOf(content)
             val bigrams = if (prevWord != null) bigramsFor(subtype) else emptyMap()
-            val corrections = correctionsFor(
-                word, index, maxCandidateCount, allowDistance2 = false,
-                bigramContextScore(prevWord, bigrams),
+            val contextScore = bigramContextScore(
+                prevWord = prevWord?.let { dictionaryContextForm(it, index, subtype) },
+                bigrams = bigrams,
+                candidateNormalizer = { dictionaryContextForm(it, index, subtype) },
             )
-            // Keep the user's exact typed word in the strip (left-most) so they can tap it to bypass the
-            // autocorrection and keep their spelling — never auto-committed itself (issue #150).
-            if (corrections.isNotEmpty()) {
-                out.putIfAbsent(
-                    word.lowercase(),
-                    WordSuggestionCandidate(
-                        text = word,
-                        confidence = 1.0,
-                        isEligibleForAutoCommit = false,
-                        sourceProvider = this,
-                    ),
+            val orthographicCorrections = orthographicCorrectionsFor(
+                word = word,
+                subtype = subtype,
+                index = index,
+                maxCount = maxCandidateCount,
+                orthographicEdits = orthographicEdits,
+                contextScore = contextScore,
+                candidateAllowed = candidateAllowed,
+            )
+
+            val corrections = when {
+                !isKnown && (completionsWereEmpty || orthographicCorrections.isNotEmpty()) -> correctionsFor(
+                    word = word,
+                    subtype = subtype,
+                    index = index,
+                    maxCount = maxCandidateCount,
+                    allowDistance2 = false,
+                    contextScore = contextScore,
+                    orthographicEdits = orthographicEdits,
+                    candidateAllowed = candidateAllowed,
                 )
+                orthographicCorrections.isNotEmpty() -> orthographicCorrections
+                else -> emptyList()
             }
-            corrections.forEachIndexed { i, correction ->
-                val text = cased(correction)
-                val freq = index.freq[correction.lowercase()] ?: 0
-                out.putIfAbsent(
-                    text.lowercase(),
-                    WordSuggestionCandidate(
-                        text = text,
-                        confidence = freq / 255.0,
-                        isEligibleForAutoCommit = i == 0 && freq >= AUTOCORRECT_MIN_FREQ,
-                        sourceProvider = this,
-                    ),
+
+            if (corrections.isNotEmpty()) {
+                val bestLower = corrections.first().lowercase()
+                val bestFrequency = candidateFrequency(bestLower, index, subtype)
+                val bestOrthographicEditCount = orthographicEdits[bestLower]
+                val autoCommitBest = when {
+                    bestFrequency < AUTOCORRECT_MIN_FREQ -> false
+                    !isKnown -> completionsWereEmpty || bestOrthographicEditCount != null
+                    knownInActiveDictionary && bestOrthographicEditCount != null ->
+                        GermanOrthography.shouldAutoCommitKnownVariant(
+                            typedFrequency = candidateFrequency(lowerWord, index, subtype),
+                            candidateFrequency = bestFrequency,
+                            typedContextScore = contextScore(lowerWord),
+                            candidateContextScore = contextScore(bestLower),
+                            transformations = bestOrthographicEditCount,
+                        )
+                    else -> false
+                }
+
+                // Keep the user's exact typed word left-most so one tap always bypasses/reverts correction (#150).
+                // If prefix completion already produced the exact word, preserve that candidate and move it forward.
+                val typedCandidate = out.remove(lowerWord) ?: WordSuggestionCandidate(
+                    text = word,
+                    confidence = 1.0,
+                    isEligibleForAutoCommit = false,
+                    sourceProvider = this,
                 )
+                val prioritized = LinkedHashMap<String, SuggestionCandidate>()
+                prioritized[lowerWord] = typedCandidate
+                corrections.forEachIndexed { i, correction ->
+                    val text = cased(correction)
+                    val freq = candidateFrequency(correction.lowercase(), index, subtype)
+                    prioritized.putIfAbsent(
+                        text.lowercase(),
+                        WordSuggestionCandidate(
+                            text = text,
+                            confidence = freq / 255.0,
+                            isEligibleForAutoCommit = i == 0 && autoCommitBest,
+                            sourceProvider = this,
+                        ),
+                    )
+                }
+                for ((key, candidate) in out) prioritized.putIfAbsent(key, candidate)
+                out.clear()
+                out.putAll(prioritized)
             }
         }
 
@@ -538,11 +723,17 @@ class LatinLanguageProvider(context: Context) : SpellingProvider, SuggestionProv
     }
 
     override suspend fun getListOfWords(subtype: Subtype): List<String> {
-        return wordDataFor(subtype).keys.toList()
+        val words = wordDataFor(subtype).keys
+        return if (isSwissGerman(subtype)) {
+            words.asSequence().map(GermanOrthography::toSwissSpelling).distinct().toList()
+        } else {
+            words.toList()
+        }
     }
 
     override suspend fun getFrequencyForWord(subtype: Subtype, word: String): Double {
-        return (wordDataFor(subtype)[word] ?: 0) / 255.0
+        val index = lowerIndexFor(subtype)
+        return candidateFrequency(word.lowercase(), index, subtype) / 255.0
     }
 
     override suspend fun destroy() {
