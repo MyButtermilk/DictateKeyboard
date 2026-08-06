@@ -16,6 +16,7 @@
     <string name="wear_err_mic_grant">Zezwól na mikrofon w Dictate</string>
     <string name="wear_err_mic_unavailable">Mikrofon niedostępny</string>
     <string name="wear_err_transcribe_failed">Transkrypcja nieudana</string>
+    <string name="wear_err_tap_to_retry">%1$s · Dotknij, aby ponowić</string>
     <string name="wear_err_empty">Pusto — sprawdź klucz</string>
     <string name="wear_err_unknown">Nieznany błąd</string>
     <string name="wear_err_no_transport">Brak telefonu; zsynch. klucz</string>
@@ -33,9 +34,6 @@
     <string name="wear_kb_enabled">Klawiatura włączona ✓</string>
     <string name="wear_kb_enable_on">Pisze w każdej apce</string>
     <string name="wear_kb_enable_off">Włącz w ustawieniach</string>
-    <string name="wear_kb_choose">Wybierz klawiaturę</string>
-    <string name="wear_kb_chosen">Klawiatura wybrana ✓</string>
-    <string name="wear_kb_choose_sub">Wybierz Dictate w polu</string>
     <string name="wear_key">Klucz w zegarku</string>
     <string name="wear_key_on">Dyktuje sam</string>
     <string name="wear_key_off">Tylko z telefonem</string>

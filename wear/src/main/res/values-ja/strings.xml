@@ -16,6 +16,7 @@
     <string name="wear_err_mic_grant">Dictateアプリでマイクを許可</string>
     <string name="wear_err_mic_unavailable">マイクを使えません</string>
     <string name="wear_err_transcribe_failed">文字起こしに失敗</string>
+    <string name="wear_err_tap_to_retry">%1$s · タップで再試行</string>
     <string name="wear_err_empty">空 — 携帯のキーを確認</string>
     <string name="wear_err_unknown">不明なエラー</string>
     <string name="wear_err_no_transport">携帯なし。アプリでキー同期</string>
@@ -33,9 +34,6 @@
     <string name="wear_kb_enabled">キーボード有効 ✓</string>
     <string name="wear_kb_enable_on">どのアプリでも入力</string>
     <string name="wear_kb_enable_off">設定でオンに</string>
-    <string name="wear_kb_choose">キーボードを選択</string>
-    <string name="wear_kb_chosen">キーボード選択済み ✓</string>
-    <string name="wear_kb_choose_sub">入力欄でDictateを選択</string>
     <string name="wear_key">時計にキー</string>
     <string name="wear_key_on">単独で音声入力</string>
     <string name="wear_key_off">携帯のみ</string>

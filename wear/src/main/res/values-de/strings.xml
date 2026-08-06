@@ -16,6 +16,7 @@
     <string name="wear_err_mic_grant">Mikro in Dictate-App erlauben</string>
     <string name="wear_err_mic_unavailable">Mikrofon nicht verfügbar</string>
     <string name="wear_err_transcribe_failed">Transkription fehlgeschlagen</string>
+    <string name="wear_err_tap_to_retry">%1$s · Zum Wiederholen tippen</string>
     <string name="wear_err_empty">Leer — Schlüssel am Handy prüfen</string>
     <string name="wear_err_unknown">Unbekannter Fehler</string>
     <string name="wear_err_no_transport">Kein Handy; Schlüssel in App syncen</string>
@@ -33,9 +34,6 @@
     <string name="wear_kb_enabled">Tastatur aktiviert ✓</string>
     <string name="wear_kb_enable_on">Tippt in jeder App</string>
     <string name="wear_kb_enable_off">In Einstellungen aktivieren</string>
-    <string name="wear_kb_choose">Tastatur wählen</string>
-    <string name="wear_kb_chosen">Tastatur gewählt ✓</string>
-    <string name="wear_kb_choose_sub">Dictate im Feld wählen</string>
     <string name="wear_key">Schlüssel auf Uhr</string>
     <string name="wear_key_on">Diktiert allein</string>
     <string name="wear_key_off">Nur mit Handy</string>

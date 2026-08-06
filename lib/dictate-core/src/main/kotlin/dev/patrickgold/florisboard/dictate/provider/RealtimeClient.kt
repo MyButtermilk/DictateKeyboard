@@ -12,6 +12,8 @@ package dev.patrickgold.florisboard.dictate.provider
 
 import android.util.Base64
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
@@ -21,15 +23,12 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
-import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString.Companion.toByteString
-import java.net.Inet4Address
-import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 /**
@@ -46,21 +45,13 @@ object RealtimeClient {
     private val wsClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)   // fail a dead route fast instead of stalling the session
+            // Race IPv6/IPv4 with OkHttp 5 Happy Eyeballs instead of forcing either address family.
+            .fastFallback(true)
             .readTimeout(0, TimeUnit.SECONDS)   // long-lived stream
             .writeTimeout(20, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)
             .pingInterval(20, TimeUnit.SECONDS)
-            // Prefer IPv4: some hosts (e.g. Google's generativelanguage endpoint) return many IPv6
-            // addresses, and on a network with broken/black-holed IPv6 OkHttp would try each one and
-            // hit the connect timeout before falling back to IPv4 — an ~80s stall (issue #128). Trying
-            // IPv4 first connects immediately there while still falling back to IPv6 when needed.
-            .dns(Ipv4FirstDns)
             .build()
-    }
-
-    private object Ipv4FirstDns : Dns {
-        override fun lookup(hostname: String): List<InetAddress> =
-            Dns.SYSTEM.lookup(hostname).sortedBy { if (it is Inet4Address) 0 else 1 }
     }
 
     /** The PCM sample rate a given realtime API expects (OpenAI wants 24 kHz; the rest 16 kHz). */
@@ -74,14 +65,21 @@ object RealtimeClient {
      * call; [callbacks] deliver interim/final text (on background threads). The returned [RealtimeSession]
      * is fed PCM at [sampleRateFor] and finished/cancelled by the caller.
      */
+    /**
+     * [baseUrl] redirects the OpenAI-shaped session at a server of the user's own (#249) — several
+     * self-hosted transcription servers expose exactly this protocol under `/v1/realtime`. Null, and every
+     * session goes to its vendor's fixed address as before.
+     */
     fun open(
         api: RealtimeApi,
         apiKey: String,
         model: String,
         language: String?,
         callbacks: RealtimeCallbacks,
+        baseUrl: String? = null,
     ): RealtimeSession = when (api) {
-        RealtimeApi.OPENAI -> OpenAiRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
+        RealtimeApi.OPENAI ->
+            OpenAiRealtimeSession(wsClient, apiKey, model, language, callbacks, baseUrl).also { it.connect() }
         RealtimeApi.DEEPGRAM -> DeepgramRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
         RealtimeApi.SONIOX -> SonioxRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
         RealtimeApi.ASSEMBLYAI -> AssemblyAiRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
@@ -104,6 +102,7 @@ private class OpenAiRealtimeSession(
     private val model: String,
     private val language: String?,
     private val callbacks: RealtimeCallbacks,
+    private val baseUrl: String? = null,
 ) : RealtimeSession {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -115,14 +114,36 @@ private class OpenAiRealtimeSession(
 
     private companion object {
         const val URL = "wss://api.openai.com/v1/realtime?intent=transcription"
+
+        /**
+         * The websocket address of a self-hosted server, derived from the base URL its batch requests
+         * already use (#249) — `http(s)://host/v1/` becomes `ws(s)://host/v1/realtime`. Cleartext is
+         * deliberately allowed through: these live on a LAN, where https is the exception.
+         */
+        fun realtimeUrlFrom(baseUrl: String): String {
+            val trimmed = baseUrl.trim().trimEnd('/')
+            val ws = when {
+                trimmed.startsWith("https://", ignoreCase = true) -> "wss://" + trimmed.removeRange(0, 8)
+                trimmed.startsWith("http://", ignoreCase = true) -> "ws://" + trimmed.removeRange(0, 7)
+                trimmed.startsWith("ws://", ignoreCase = true) ||
+                    trimmed.startsWith("wss://", ignoreCase = true) -> trimmed
+                else -> "ws://$trimmed"
+            }
+            // Already pointed at the endpoint itself (or carrying its own query): take it as given.
+            return if (ws.contains("/realtime")) ws else "$ws/realtime?intent=transcription"
+        }
     }
 
     fun connect() {
         // GA interface (the OpenAI-Beta: realtime=v1 header would force the retired beta shape →
         // "beta_api_shape_disabled"). Session type ("transcription") distinguishes the session in GA.
         val request = Request.Builder()
-            .url(URL)
-            .header("Authorization", "Bearer $apiKey")
+            .url(baseUrl?.takeIf { it.isNotBlank() }?.let { realtimeUrlFrom(it) } ?: URL)
+            .apply {
+                // A server of one's own usually has no key at all, and sending an empty bearer makes some
+                // of them reject the handshake outright.
+                if (apiKey.isNotBlank()) header("Authorization", "Bearer $apiKey")
+            }
             .build()
         ws = client.newWebSocket(request, listener)
     }
@@ -178,8 +199,22 @@ private class OpenAiRealtimeSession(
                     })
                     put("transcription", buildJsonObject {
                         put("model", model)
-                        if (!language.isNullOrBlank() && language != "detect") put("language", language)
+                        if (!language.isNullOrBlank() && language != "detect") {
+                            // The gpt-transcribe generation takes `languages` as an array (it can hint
+                            // several for code-switching audio); the older models take a single
+                            // `language` string. Sending the wrong one is not an error, it is simply
+                            // ignored — the user's language choice would quietly stop applying (#248).
+                            if (usesLanguagesField(model)) {
+                                put("languages", buildJsonArray { add(JsonPrimitive(language)) })
+                            } else {
+                                put("language", language)
+                            }
+                        }
                     })
+                    // No server-side turn detection: Dictate decides when a dictation ends and commits the
+                    // buffer itself, so letting the server also cut turns would segment the same audio a
+                    // second time on its own schedule (from #243).
+                    put("turn_detection", JsonNull)
                 })
             })
         })
@@ -839,4 +874,14 @@ private class DeepgramRealtimeSession(
         runCatching { (webSocket ?: ws)?.close(1000, null) }
         callbacks.onClosed()
     }
+}
+
+/**
+ * True for OpenAI's gpt-transcribe generation, which renamed the singular `language` field to a
+ * `languages` array. Matched on the id prefix so later snapshots and variants are covered, while
+ * gpt-realtime-whisper and the gpt-4o-*-transcribe models keep the old field (issue #248).
+ */
+internal fun usesLanguagesField(model: String): Boolean {
+    val id = model.lowercase()
+    return id.startsWith("gpt-transcribe") || id.startsWith("gpt-live-transcribe")
 }

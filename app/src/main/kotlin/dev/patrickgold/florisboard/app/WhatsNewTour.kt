@@ -13,6 +13,10 @@ package dev.patrickgold.florisboard.app
 import androidx.annotation.StringRes
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.ui.viewinterop.AndroidView
+import dev.patrickgold.florisboard.dictate.ui.AudioReactiveCloudOrbView
+import dev.patrickgold.florisboard.dictate.ui.DictateAuroraOrbView
+import dev.patrickgold.florisboard.dictate.ui.DictateLatticeSphereView
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -41,7 +45,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Segment
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Celebration
+import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Dialpad
@@ -51,9 +57,18 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Dns
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Spellcheck
+import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Gif
 import androidx.compose.material3.Button
@@ -79,6 +94,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -133,7 +149,18 @@ internal data class WhatsNewPage(
     val route: Any?,
     val highlight: Boolean = false,
     val kind: PageKind = PageKind.FEATURE,
+    /** Render live artwork instead of a static icon; null shows the [icon]. */
+    val art: TourArt? = null,
 )
+
+/** The live previews a page can show in place of its icon — the real views, not a picture of them. */
+internal enum class TourArt {
+    /** The audio-reactive cloud orb (5.2). */
+    CLOUD_ORB,
+
+    /** Aurora and Lattice side by side, both idle, as the button actually sits there (5.3). */
+    DESIGN_ORBS,
+}
 
 private val WhatsNewPages50: List<WhatsNewPage> = listOf(
     WhatsNewPage(
@@ -307,6 +334,170 @@ private val WhatsNewPages51: List<WhatsNewPage> = listOf(
     ),
 )
 
+
+private val WhatsNewPages52: List<WhatsNewPage> = listOf(
+    WhatsNewPage(
+        icon = Icons.Filled.AutoAwesome,
+        eyebrow = R.string.apptour52__intro_eyebrow,
+        title = R.string.apptour52__intro_title,
+        body = R.string.apptour52__intro_body,
+        cta = R.string.apptour__start,
+        route = null,
+        kind = PageKind.INTRO,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.RecordVoiceOver,
+        eyebrow = R.string.apptour52__voiceinput_eyebrow,
+        title = R.string.apptour52__voiceinput_title,
+        body = R.string.apptour52__voiceinput_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.Dictate,
+        highlight = true,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Bolt,
+        eyebrow = R.string.apptour52__liveprompt_eyebrow,
+        title = R.string.apptour52__liveprompt_title,
+        body = R.string.apptour52__liveprompt_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.DictateFloatingButton,
+        highlight = true,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.PhoneAndroid,
+        eyebrow = R.string.apptour52__ondevice_eyebrow,
+        title = R.string.apptour52__ondevice_title,
+        body = R.string.apptour52__ondevice_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.DictateProviders,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.ContentCut,
+        eyebrow = R.string.apptour52__trim_eyebrow,
+        title = R.string.apptour52__trim_title,
+        body = R.string.apptour52__trim_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.DictateRecording,
+    ),
+    WhatsNewPage(
+        icon = Icons.AutoMirrored.Filled.Segment,
+        eyebrow = R.string.apptour52__paragraphs_eyebrow,
+        title = R.string.apptour52__paragraphs_title,
+        body = R.string.apptour52__paragraphs_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.DictateOutput,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Psychology,
+        eyebrow = R.string.apptour52__smartturn_eyebrow,
+        title = R.string.apptour52__smartturn_title,
+        body = R.string.apptour52__smartturn_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.DictateRecording,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Cloud,
+        eyebrow = R.string.apptour52__orb_eyebrow,
+        title = R.string.apptour52__orb_title,
+        body = R.string.apptour52__orb_body,
+        cta = R.string.apptour52__cta_try,
+        route = Routes.Settings.DictateFloatingButton,
+        highlight = true,
+        art = TourArt.CLOUD_ORB,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Celebration,
+        eyebrow = R.string.apptour52__outro_eyebrow,
+        title = R.string.apptour52__outro_title,
+        body = R.string.apptour52__outro_body,
+        cta = R.string.apptour__done,
+        route = null,
+        kind = PageKind.OUTRO,
+    ),
+)
+
+private val WhatsNewPages53: List<WhatsNewPage> = listOf(
+    WhatsNewPage(
+        icon = Icons.Filled.AutoAwesome,
+        eyebrow = R.string.apptour53__intro_eyebrow,
+        title = R.string.apptour53__intro_title,
+        body = R.string.apptour53__intro_body,
+        cta = R.string.apptour__start,
+        route = null,
+        kind = PageKind.INTRO,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.TouchApp,
+        eyebrow = R.string.apptour53__pushtotalk_eyebrow,
+        title = R.string.apptour53__pushtotalk_title,
+        body = R.string.apptour53__pushtotalk_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.Dictate,
+        highlight = true,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Spellcheck,
+        eyebrow = R.string.apptour53__autocorrect_eyebrow,
+        title = R.string.apptour53__autocorrect_title,
+        body = R.string.apptour53__autocorrect_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.Typing,
+        highlight = true,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.CloudOff,
+        eyebrow = R.string.apptour53__offline_eyebrow,
+        title = R.string.apptour53__offline_title,
+        body = R.string.apptour53__offline_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.DictateProviders,
+        highlight = true,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Translate,
+        eyebrow = R.string.apptour53__languages_eyebrow,
+        title = R.string.apptour53__languages_title,
+        body = R.string.apptour53__languages_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.DictateLanguages,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Brush,
+        eyebrow = R.string.apptour53__designs_eyebrow,
+        title = R.string.apptour53__designs_title,
+        body = R.string.apptour53__designs_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.DictateFloatingButton,
+        highlight = true,
+        art = TourArt.DESIGN_ORBS,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Lightbulb,
+        eyebrow = R.string.apptour53__prediction_eyebrow,
+        title = R.string.apptour53__prediction_title,
+        body = R.string.apptour53__prediction_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.Typing,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Dns,
+        eyebrow = R.string.apptour53__ownserver_eyebrow,
+        title = R.string.apptour53__ownserver_title,
+        body = R.string.apptour53__ownserver_body,
+        cta = R.string.apptour53__cta_try,
+        route = Routes.Settings.DictateProviders,
+    ),
+    WhatsNewPage(
+        icon = Icons.Filled.Celebration,
+        eyebrow = R.string.apptour53__outro_eyebrow,
+        title = R.string.apptour53__outro_title,
+        body = R.string.apptour53__outro_body,
+        cta = R.string.apptour__done,
+        route = null,
+        kind = PageKind.OUTRO,
+    ),
+)
+
 /**
  * The ordered registry of all "What's new" tours (ascending by version). The auto-show logic queues every
  * tour a user hasn't seen yet; Settings › About lists them all for re-viewing. Append the next release's
@@ -315,6 +506,8 @@ private val WhatsNewPages51: List<WhatsNewPage> = listOf(
 internal val WHATS_NEW_TOURS: List<WhatsNewTourDef> = listOf(
     WhatsNewTourDef(VersionName(5, 0, 0), WhatsNewPages50),
     WhatsNewTourDef(VersionName(5, 1, 0), WhatsNewPages51),
+    WhatsNewTourDef(VersionName(5, 2, 0), WhatsNewPages52),
+    WhatsNewTourDef(VersionName(5, 3, 0), WhatsNewPages53),
 )
 
 /**
@@ -532,6 +725,63 @@ fun WhatsNewTour(autoQueue: List<VersionName>) {
     }
 }
 
+/**
+ * A live preview of the cloud orb skin (issue #231 follow-up / 5.2 tour). Drives a slow synthetic level
+ * so the orb visibly pulses the way it does while dictating, instead of sitting still.
+ */
+@Composable
+private fun TourCloudOrb() {
+    val transition = rememberInfiniteTransition(label = "orb-preview")
+    val level by transition.animateFloat(
+        initialValue = 0.15f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(tween(1400), RepeatMode.Reverse),
+        label = "orb-level",
+    )
+    Box(modifier = Modifier.size(132.dp), contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { ctx ->
+                AudioReactiveCloudOrbView(ctx).apply {
+                    setMode(AudioReactiveCloudOrbView.Mode.LISTENING)
+                }
+            },
+            update = { it.setLevel(level) },
+            modifier = Modifier.size(132.dp),
+        )
+    }
+}
+
+/**
+ * Aurora and Lattice side by side, exactly as they sit on the floating button when nothing is happening:
+ * the aurora drifting, the dot sphere wiring itself together. Both are the shipping views rather than a
+ * screenshot, so what the tour shows is what the user gets — and both follow the accent colour.
+ */
+@Composable
+private fun TourDesignOrbs() {
+    val accent = MaterialTheme.colorScheme.primary.toArgb()
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                DictateAuroraOrbView(ctx).apply { setMood(DictateAuroraOrbView.Mood.IDLE, accent) }
+            },
+            update = { it.setMood(DictateAuroraOrbView.Mood.IDLE, accent) },
+            modifier = Modifier.size(96.dp),
+        )
+        AndroidView(
+            factory = { ctx ->
+                DictateLatticeSphereView(ctx).apply {
+                    setMode(DictateLatticeSphereView.Mode.WEB, accent)
+                }
+            },
+            update = { it.setMode(DictateLatticeSphereView.Mode.WEB, accent) },
+            modifier = Modifier.size(96.dp),
+        )
+    }
+}
+
 @Composable
 private fun PageContent(page: WhatsNewPage) {
     Column(
@@ -557,19 +807,27 @@ private fun PageContent(page: WhatsNewPage) {
             }
         }
         Spacer(modifier = Modifier.height(20.dp))
-        Box(
-            modifier = Modifier
-                .size(72.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = page.icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(36.dp),
-            )
+        if (page.art != null) {
+            // Show the real thing instead of an icon, so the user can see the new design right here.
+            when (page.art) {
+                TourArt.CLOUD_ORB -> TourCloudOrb()
+                TourArt.DESIGN_ORBS -> TourDesignOrbs()
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(72.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = page.icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(36.dp),
+                )
+            }
         }
         Spacer(modifier = Modifier.height(18.dp))
         Text(

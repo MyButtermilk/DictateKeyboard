@@ -25,12 +25,10 @@ import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.Visibility
@@ -88,6 +86,8 @@ import dev.patrickgold.jetpref.datastore.ui.PreferenceGroup
 import dev.patrickgold.jetpref.datastore.ui.SwitchPreference
 import dev.patrickgold.jetpref.material.ui.JetPrefAlertDialog
 import kotlinx.coroutines.launch
+import org.florisboard.lib.compose.florisDialogScroll
+import org.florisboard.lib.compose.persistentVerticalScrollbar
 import org.florisboard.lib.compose.stringRes
 
 /**
@@ -130,6 +130,8 @@ fun DictateProvidersScreen() = FlorisScreen {
                 entries = buildList {
                     ProviderRegistry.presets
                         .filter { it.capabilities.transcription }
+                        // On-device (offline) first in the picker, above the cloud providers (issue #228).
+                        .sortedByDescending { it.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE }
                         .forEach { add(it.id to it.displayName) }
                     customAccounts.forEach { add(it.providerId to customLabel(it)) }
                 },
@@ -152,14 +154,14 @@ fun DictateProvidersScreen() = FlorisScreen {
             val keySet = stringRes(R.string.dictate__providers_status_key_set)
             val noKey = stringRes(R.string.dictate__providers_status_no_key)
 
-            ProviderRegistry.presets.forEach { preset ->
+            // On-device (offline) provider first, above the cloud providers like OpenAI (issue #228);
+            // the rest keep their registry display order (sortedByDescending is stable).
+            val orderedPresets = ProviderRegistry.presets
+                .sortedByDescending { it.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE }
+            orderedPresets.forEach { preset ->
                 val account = accounts[preset.id]
                 Preference(
-                    icon = if (preset.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE) {
-                        Icons.Default.PhoneAndroid
-                    } else {
-                        Icons.Default.Cloud
-                    },
+                    icon = providerIcon(preset.id),
                     title = preset.displayName,
                     summary = providerSummary(preset, account, keySet, noKey),
                     onClick = { editingId = preset.id },
@@ -230,28 +232,6 @@ fun DictateProvidersScreen() = FlorisScreen {
     }
 }
 
-/**
- * Draws a thin, rounded scrollbar thumb on the trailing edge of a [verticalScroll]ed container so the
- * user can tell there is more content below (Compose has no built-in scrollbar). Nothing is drawn when
- * the content already fits.
- */
-private fun Modifier.verticalScrollbar(state: ScrollState, color: Color, width: Dp = 3.dp): Modifier =
-    drawWithContent {
-        drawContent()
-        val max = state.maxValue
-        if (max > 0 && max != Int.MAX_VALUE) {
-            val viewport = size.height
-            val thumbHeight = viewport * (viewport / (viewport + max))
-            val top = (viewport - thumbHeight) * (state.value.toFloat() / max)
-            val w = width.toPx()
-            drawRoundRect(
-                color = color,
-                topLeft = Offset(size.width - w, top),
-                size = Size(w, thumbHeight),
-                cornerRadius = CornerRadius(w / 2, w / 2),
-            )
-        }
-    }
 
 @Composable
 private fun RewordingProviderPreference(entries: List<Pair<String, String>>, showInfo: Boolean) {
@@ -299,7 +279,7 @@ private fun RewordingProviderPreference(entries: List<Pair<String, String>>, sho
             Column(
                 modifier = Modifier
                     .heightIn(max = 320.dp)
-                    .verticalScrollbar(scrollState, scrollbarColor)
+                    .persistentVerticalScrollbar(scrollState, scrollbarColor)
                     .verticalScroll(scrollState)
                     .padding(end = 6.dp),
             ) {
@@ -320,6 +300,7 @@ private fun RewordingProviderPreference(entries: List<Pair<String, String>>, sho
 
     if (infoOpen) {
         JetPrefAlertDialog(
+            scrollModifier = florisDialogScroll(),
             title = stringRes(R.string.dictate__providers_active_rewording),
             confirmLabel = stringRes(R.string.action__ok),
             onConfirm = { infoOpen = false },
@@ -376,7 +357,7 @@ private fun TranscriptionProviderPreference(entries: List<Pair<String, String>>)
                 Column(
                     modifier = Modifier
                         .heightIn(max = 320.dp)
-                        .verticalScrollbar(scrollState, scrollbarColor)
+                        .persistentVerticalScrollbar(scrollState, scrollbarColor)
                         .verticalScroll(scrollState)
                         .padding(end = 6.dp),
                 ) {
@@ -431,13 +412,22 @@ private fun providerSummary(
     noKey: String,
 ): String {
     if (preset.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE) {
-        // On-device provider: surface the active downloaded model instead of an API-key state.
+        // On-device provider: surface the active downloaded models instead of an API-key state. There can
+        // be two — a one-shot and a live/streaming one (#233) — and both are worth showing, otherwise the
+        // row claims only half of what is set up.
         val context = LocalContext.current
-        val spec = account?.transcriptionModel?.takeIf { it.isNotBlank() }?.let { LocalModelCatalog.byId(it) }
-        return if (spec != null && LocalModelManager.isInstalled(context, spec.id)) {
-            spec.displayName
-        } else {
+        fun installedName(id: String?): String? = id?.takeIf { it.isNotBlank() }
+            ?.let { LocalModelCatalog.byId(it) }
+            ?.takeIf { LocalModelManager.isInstalled(context, it.id) }
+            ?.displayName
+        val names = listOfNotNull(
+            installedName(account?.transcriptionModel),
+            installedName(account?.realtimeModel),
+        ).distinct() // a pre-split setup can have the same streaming model in both slots
+        return if (names.isEmpty()) {
             stringRes(R.string.dictate__local_model_none_selected)
+        } else {
+            names.joinToString(" · ")
         }
     }
     val caps = buildList {
@@ -480,19 +470,50 @@ private fun ProviderEditorDialog(
             account.customBaseUrl.ifBlank { if (preset?.allowsCustomBaseUrl == true) preset.baseUrl else "" },
         )
     }
-    var transcriptionModel by remember { mutableStateOf(account.transcriptionModel) }
-    var chatModel by remember { mutableStateOf(account.chatModel) }
+    // Model fields show the *effective* model, filling in the preset default when nothing was chosen —
+    // an empty box tells the user nothing about what is actually running. Storage keeps the old meaning:
+    // [modelToStore] turns a value that still equals the default back into an empty string on confirm, so
+    // the account goes on following the preset and a later update can move it. Only a deliberate choice of
+    // something else is pinned.
+    // On-device: a streaming model stored in the one-shot slot predates the two-slot split (#233) — move
+    // it across on open so the dialog shows it under "Live" where it belongs, instead of as the one-shot
+    // pick it was never meant to be.
+    val legacyStreamingPick = preset?.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE &&
+        LocalModelCatalog.isStreaming(account.transcriptionModel)
+    var transcriptionModel by remember {
+        mutableStateOf(
+            if (legacyStreamingPick) "" else {
+                account.transcriptionModel.ifBlank { preset?.defaultTranscriptionModel.orEmpty() }
+            },
+        )
+    }
+    var chatModel by remember {
+        mutableStateOf(account.chatModel.ifBlank { preset?.defaultChatModel.orEmpty() })
+    }
+    var realtimeModel by remember {
+        mutableStateOf(
+            if (legacyStreamingPick) account.transcriptionModel else {
+                account.realtimeModel.ifBlank { preset?.defaultRealtimeModel.orEmpty() }
+            },
+        )
+    }
+    var showRealtimePicker by remember { mutableStateOf(false) }
     // Live catalog cache, updated when the picker fetches; persisted together with the rest on confirm.
     var cachedModels by remember { mutableStateOf(account.cachedModels) }
     var cachedAudioModels by remember { mutableStateOf(account.cachedAudioModels) }
     var cachedTranscriptionModels by remember { mutableStateOf(account.cachedTranscriptionModels) }
     var transcriptionViaChat by remember { mutableStateOf(account.transcriptionViaChat) }
+    // Self-hosted streaming (#249): whether this endpoint speaks the OpenAI realtime protocol. Nothing in
+    // a catalog reveals that, so the user says so.
+    var customRealtime by remember { mutableStateOf(account.customRealtime) }
+    // Wake-on-demand (#189): whether this endpoint sits in front of a machine that sleeps between jobs.
+    var customWarmUp by remember { mutableStateOf(account.customWarmUp) }
     var pickerKind by remember { mutableStateOf<ModelKind?>(null) }
 
     // Effective preset to drive the model picker / connection test. Custom endpoints get a base-URL-only
     // preset; a base-URL-editable built-in (Ollama, #136) uses the edited URL over its localhost default.
     val effectivePreset = when {
-        preset == null -> ProviderRegistry.custom(baseUrl)
+        preset == null -> ProviderRegistry.custom(baseUrl, realtime = customRealtime)
         preset.allowsCustomBaseUrl -> preset.copy(baseUrl = baseUrl.ifBlank { preset.baseUrl })
         else -> preset
     }
@@ -522,6 +543,9 @@ private fun ProviderEditorDialog(
 
     JetPrefAlertDialog(
         title = preset?.displayName ?: stringRes(R.string.dictate__providers_custom_title),
+        // The whole body scrolls as one — the on-device model list makes this dialog the tallest in the
+        // app, and pinning the intro/checkbox/slider while only the list moved read as two panes.
+        scrollModifier = florisDialogScroll(),
         confirmLabel = stringRes(R.string.action__ok),
         dismissLabel = stringRes(R.string.action__cancel),
         neutralLabel = if (onDelete != null) stringRes(R.string.action__delete) else null,
@@ -531,8 +555,11 @@ private fun ProviderEditorDialog(
                     displayName = displayName.trim(),
                     apiKey = apiKey.trim(),
                     customBaseUrl = baseUrl.trim(),
-                    transcriptionModel = transcriptionModel.trim(),
-                    chatModel = chatModel.trim(),
+                    customRealtime = customRealtime,
+                    customWarmUp = customWarmUp,
+                    transcriptionModel = modelToStore(transcriptionModel, preset?.defaultTranscriptionModel),
+                    chatModel = modelToStore(chatModel, preset?.defaultChatModel),
+                    realtimeModel = modelToStore(realtimeModel, preset?.defaultRealtimeModel),
                     cachedModels = cachedModels,
                     cachedAudioModels = cachedAudioModels,
                     cachedTranscriptionModels = cachedTranscriptionModels,
@@ -550,9 +577,14 @@ private fun ProviderEditorDialog(
     ) {
         if (preset?.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE) {
             // On-device provider: no key/remote model — manage downloadable models instead (#104).
+            // Two independent picks (#233): the one-shot model lives in `transcriptionModel`, the live
+            // streaming one in `realtimeModel` — which is otherwise unused for this provider and means
+            // exactly that. Both stay selected at once, so choosing a live model never drops the one-shot.
             LocalModelSection(
                 activeModelId = transcriptionModel,
+                activeStreamingModelId = realtimeModel,
                 onActiveModelChange = { transcriptionModel = it },
+                onActiveStreamingModelChange = { realtimeModel = it },
             )
         } else {
         Column {
@@ -596,8 +628,56 @@ private fun ProviderEditorDialog(
                         ?: stringRes(R.string.dictate__model_placeholder),
                     onBrowse = { pickerKind = ModelKind.TRANSCRIPTION },
                 )
-                // Real-time streaming model (issue #128) is intentionally not exposed: every provider has
-                // effectively one usable streaming model, so the engine always uses the preset default.
+                // Streaming runs over a different endpoint and protocol than batch STT, so it gets its own
+                // field rather than being folded into the picker above (#248, based on #243). It used to be
+                // hidden on the assumption that each provider has exactly one usable streaming model, which
+                // stopped being true once OpenAI shipped a second generation of them — and until now the
+                // stored realtimeModel had no way of ever being set.
+                if (preset?.supportsRealtime == true && preset.curatedRealtimeModels.isNotEmpty()) {
+                    EditorField(
+                        label = stringRes(R.string.dictate__providers_field_realtime_model),
+                        value = realtimeModel,
+                        onValueChange = { realtimeModel = it },
+                        placeholder = preset.defaultRealtimeModel
+                            ?: stringRes(R.string.dictate__model_placeholder),
+                        onBrowse = { showRealtimePicker = true },
+                    )
+                }
+                // A server of the user's own can stream too (#249), if it speaks the OpenAI realtime
+                // protocol under /v1/realtime — which several self-hosted transcription servers do. There
+                // is no way to tell without connecting, so this is a switch rather than a guess.
+                if (isCustom) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { customRealtime = !customRealtime }
+                            .padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = stringRes(R.string.dictate__providers_custom_realtime),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Text(
+                                text = stringRes(R.string.dictate__providers_custom_realtime_summary),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = customRealtime, onCheckedChange = { customRealtime = it })
+                    }
+                    // Optional: many self-hosted servers serve whatever model they were started with, so a
+                    // blank box means "whatever you have".
+                    if (customRealtime) {
+                        EditorField(
+                            label = stringRes(R.string.dictate__providers_field_realtime_model),
+                            value = realtimeModel,
+                            onValueChange = { realtimeModel = it },
+                            placeholder = stringRes(R.string.dictate__model_placeholder),
+                        )
+                    }
+                }
             }
             // Rewording model is unused while single-call multimodal is on (one model does both, #130).
             if (showChat && !transcriptionViaChat) {
@@ -609,6 +689,31 @@ private fun ProviderEditorDialog(
                         ?: stringRes(R.string.dictate__model_placeholder),
                     onBrowse = { pickerKind = ModelKind.CHAT },
                 )
+                // Wake-on-demand (#189): a GPU box that sleeps between jobs only starts waking when
+                // something reaches it, so the first rewording otherwise pays for the whole boot. Offered
+                // only for endpoints of the user's own — nowhere else is there a machine to wake.
+                if (isCustom) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { customWarmUp = !customWarmUp }
+                            .padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text(
+                                text = stringRes(R.string.dictate__providers_custom_warm_up),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Text(
+                                text = stringRes(R.string.dictate__providers_custom_warm_up_summary),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = customWarmUp, onCheckedChange = { customWarmUp = it })
+                    }
+                }
             }
             // Single-call multimodal (issue #130): kept at the bottom; when on, this one model transcribes
             // and formats in a single request (the rewording model above is hidden). Offered for any
@@ -668,6 +773,79 @@ private fun ProviderEditorDialog(
             },
             onDismiss = { pickerKind = null },
         )
+    }
+
+    if (showRealtimePicker && preset != null) {
+        RealtimeModelPickerDialog(
+            models = preset.curatedRealtimeModels,
+            default = preset.defaultRealtimeModel,
+            current = realtimeModel,
+            onPick = { realtimeModel = it },
+            onDismiss = { showRealtimePicker = false },
+        )
+    }
+}
+
+/**
+ * What actually gets written for a model field: an empty string when the value still equals the preset
+ * default, so the account keeps following it, and the trimmed value otherwise. The editor itself shows the
+ * default filled in, which is why this cannot simply store what is on screen.
+ */
+private fun modelToStore(value: String, default: String?): String {
+    val trimmed = value.trim()
+    return if (default != null && trimmed == default) "" else trimmed
+}
+
+/**
+ * Picker for a provider's curated realtime models — a short radio list rather than the searchable
+ * catalogue used for batch models, because streaming models are few and never appear in `/models`.
+ *
+ * Always writes the chosen id into the field, including for the default, so the box never sits empty
+ * while a model is in fact running. Turning that back into an empty stored value is [modelToStore]'s job
+ * on confirm.
+ */
+@Composable
+private fun RealtimeModelPickerDialog(
+    models: List<String>,
+    default: String?,
+    current: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    JetPrefAlertDialog(
+        scrollModifier = florisDialogScroll(),
+        title = stringRes(R.string.dictate__providers_field_realtime_model),
+        dismissLabel = stringRes(R.string.action__cancel),
+        onDismiss = onDismiss,
+    ) {
+        Column {
+            models.forEach { model ->
+                val isDefault = model == default
+                val pick = { onPick(model); onDismiss() }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = pick)
+                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = current == model || (current.isBlank() && isDefault),
+                        onClick = pick,
+                    )
+                    Column(modifier = Modifier.padding(start = 8.dp)) {
+                        Text(model, style = MaterialTheme.typography.bodyLarge)
+                        if (isDefault) {
+                            Text(
+                                stringRes(R.string.dictate__providers_realtime_model_default),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

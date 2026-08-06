@@ -16,6 +16,7 @@
     <string name="wear_err_mic_grant">امنح الميكروفون في تطبيق Dictate</string>
     <string name="wear_err_mic_unavailable">الميكروفون غير متاح</string>
     <string name="wear_err_transcribe_failed">فشل النسخ</string>
+    <string name="wear_err_tap_to_retry">%1$s · انقر لإعادة المحاولة</string>
     <string name="wear_err_empty">فارغ — تحقق من مفتاح الهاتف</string>
     <string name="wear_err_unknown">خطأ غير معروف</string>
     <string name="wear_err_no_transport">لا هاتف؛ زامن المفتاح في التطبيق</string>
@@ -33,9 +34,6 @@
     <string name="wear_kb_enabled">تم تفعيل اللوحة ✓</string>
     <string name="wear_kb_enable_on">يكتب في أي تطبيق</string>
     <string name="wear_kb_enable_off">فعّله في الإعدادات</string>
-    <string name="wear_kb_choose">اختر لوحة المفاتيح</string>
-    <string name="wear_kb_chosen">تم اختيار اللوحة ✓</string>
-    <string name="wear_kb_choose_sub">اختر Dictate في حقل</string>
     <string name="wear_key">المفتاح على الساعة</string>
     <string name="wear_key_on">يملي بمفرده</string>
     <string name="wear_key_off">عبر الهاتف فقط</string>
