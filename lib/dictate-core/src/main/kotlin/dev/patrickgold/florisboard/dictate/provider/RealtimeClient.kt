@@ -77,6 +77,7 @@ object RealtimeClient {
         language: String?,
         callbacks: RealtimeCallbacks,
         baseUrl: String? = null,
+        customVocabulary: List<String> = emptyList(),
     ): RealtimeSession = when (api) {
         RealtimeApi.OPENAI ->
             OpenAiRealtimeSession(wsClient, apiKey, model, language, callbacks, baseUrl).also { it.connect() }
@@ -84,7 +85,9 @@ object RealtimeClient {
         RealtimeApi.SONIOX -> SonioxRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
         RealtimeApi.ASSEMBLYAI -> AssemblyAiRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
         RealtimeApi.ELEVENLABS -> ElevenLabsRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
-        RealtimeApi.GEMINI -> GeminiRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
+        RealtimeApi.GEMINI ->
+            GeminiRealtimeSession(wsClient, apiKey, model, language, customVocabulary, callbacks)
+                .also { it.connect() }
         RealtimeApi.MISTRAL_VOXTRAL -> MistralRealtimeSession(wsClient, apiKey, model, language, callbacks).also { it.connect() }
     }
 }
@@ -573,20 +576,19 @@ private class ElevenLabsRealtimeSession(
 /**
  * Google Gemini Live over the BidiGenerateContent WebSocket (`?key=` auth). A `setup` message enables
  * input-audio transcription (TEXT response modality); 16 kHz mono PCM16 is sent base64 as `realtimeInput`.
- * Input transcript chunks arrive in `serverContent.inputTranscription.text` and are concatenated. `finish()`
- * sends `audioStreamEnd`; the last chunks flush and `turnComplete`/`generationComplete` closes the session.
+ * Interim hypotheses arrive in `serverContent.interimInputTranscription`; authoritative segments arrive
+ * in `inputTranscription`. `finish()` sends `audioStreamEnd`; the last segment flushes before close.
  */
 private class GeminiRealtimeSession(
     private val client: OkHttpClient,
     private val apiKey: String,
     private val model: String,
     private val language: String?,
+    private val customVocabulary: List<String>,
     private val callbacks: RealtimeCallbacks,
 ) : RealtimeSession {
 
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private var ws: WebSocket? = null
-    private val transcript = StringBuilder()
     private val audioGate = RealtimeAudioGate()
     @Volatile private var finishing = false
     @Volatile private var done = false
@@ -613,8 +615,12 @@ private class GeminiRealtimeSession(
     }
 
     private fun handle(webSocket: WebSocket, text: String) {
-        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
-        if (obj.containsKey("setupComplete")) {
+        val event = GeminiRealtimeProtocol.parse(text) ?: return
+        event.error?.let {
+            emitError(RuntimeException("Gemini realtime error: $it"))
+            return
+        }
+        if (event.setupComplete) {
             // Gemini also forbids audio before setupComplete. Preserve and replay the mic startup rather
             // than dropping it while waiting for the server acknowledgement.
             audioGate.markReady(
@@ -622,27 +628,12 @@ private class GeminiRealtimeSession(
                 finish = { sendAudioEnd(webSocket) },
             )
         }
-        val server = obj["serverContent"]?.jsonObject
-        server?.get("inputTranscription")?.jsonObject?.get("text")?.jsonPrimitive?.content?.let { chunk ->
-            if (chunk.isNotEmpty()) {
-                transcript.append(chunk)
-                callbacks.onPartial(transcript.toString())
-            }
-        }
-        val ended = server?.get("turnComplete")?.jsonPrimitive?.booleanOrNull == true ||
-            server?.get("generationComplete")?.jsonPrimitive?.booleanOrNull == true
-        if (ended && finishing) finalizeAndClose(webSocket)
+        event.interim?.takeIf { it.isNotEmpty() }?.let(callbacks::onPartial)
+        event.final?.takeIf { it.isNotEmpty() }?.let(callbacks::onFinalSegment)
+        if (event.completed && finishing) finalizeAndClose(webSocket)
     }
 
-    private fun setup(): String = buildJsonObject {
-        putJsonObject("setup") {
-            put("model", "models/$model")
-            putJsonObject("generationConfig") {
-                put("responseModalities", buildJsonArray { add("TEXT") })
-            }
-            putJsonObject("inputAudioTranscription") { }
-        }
-    }.toString()
+    private fun setup(): String = GeminiRealtimeProtocol.setup(model, language, customVocabulary)
 
     override fun sendAudio(pcm16: ByteArray, len: Int) {
         audioGate.sendAudio(pcm16, len) { audio, length ->
@@ -693,9 +684,60 @@ private class GeminiRealtimeSession(
         if (done) return
         done = true
         audioGate.close()
-        if (transcript.isNotEmpty()) callbacks.onFinalSegment(transcript.toString())
         runCatching { (webSocket ?: ws)?.close(1000, null) }
         callbacks.onClosed()
+    }
+}
+
+internal data class GeminiRealtimeEvent(
+    val setupComplete: Boolean = false,
+    val interim: String? = null,
+    val final: String? = null,
+    val completed: Boolean = false,
+    val error: String? = null,
+)
+
+/** Pure Gemini Live framing/parsing kept separate so the documented wire contract is JVM-testable. */
+internal object GeminiRealtimeProtocol {
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    fun setup(model: String, language: String?, customVocabulary: List<String>): String = buildJsonObject {
+        putJsonObject("setup") {
+            put("model", "models/${model.removePrefix("models/")}")
+            putJsonObject("generationConfig") {
+                put("responseModalities", buildJsonArray { add("TEXT") })
+            }
+            putJsonObject("inputAudioTranscription") {
+                put("languageCodes", buildJsonArray {
+                    geminiTranscriptionLanguageCode(language)?.let { add(it) }
+                })
+                val vocabulary = customVocabulary.asSequence()
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
+                    .take(1_000)
+                    .toList()
+                if (vocabulary.isNotEmpty()) {
+                    put("customVocabulary", buildJsonArray { vocabulary.forEach { add(it) } })
+                }
+            }
+        }
+    }.toString()
+
+    fun parse(text: String): GeminiRealtimeEvent? {
+        val obj = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
+        val error = obj["error"]?.jsonObject
+        val server = obj["serverContent"]?.jsonObject
+        return GeminiRealtimeEvent(
+            setupComplete = obj.containsKey("setupComplete"),
+            interim = server?.get("interimInputTranscription")?.jsonObject
+                ?.get("text")?.jsonPrimitive?.content,
+            final = server?.get("inputTranscription")?.jsonObject
+                ?.get("text")?.jsonPrimitive?.content,
+            completed = server?.get("turnComplete")?.jsonPrimitive?.booleanOrNull == true ||
+                server?.get("generationComplete")?.jsonPrimitive?.booleanOrNull == true,
+            error = error?.get("message")?.jsonPrimitive?.content ?: error?.toString(),
+        )
     }
 }
 

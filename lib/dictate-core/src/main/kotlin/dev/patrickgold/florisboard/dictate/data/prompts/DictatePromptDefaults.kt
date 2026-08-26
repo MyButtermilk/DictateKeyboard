@@ -160,15 +160,19 @@ object DictatePromptDefaults {
      * [base] is null/blank, or `"<base> <words>"` otherwise. Returns null only when both are empty.
      */
     fun appendCustomWords(base: String?, rawWords: String?): String? {
-        val words = rawWords.orEmpty()
-            .split(',', '\n')
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
+        val words = parseCustomWords(rawWords)
         val baseClean = base?.trim()?.takeIf { it.isNotEmpty() }
         if (words.isEmpty()) return baseClean
         val glossary = words.joinToString(", ")
         return if (baseClean == null) glossary else "$baseClean $glossary"
     }
+
+    /** Parses the custom-words preference for provider-native vocabulary biasing. */
+    fun parseCustomWords(rawWords: String?): List<String> = rawWords.orEmpty()
+        .split(',', '\n')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
 
     /**
      * A short example sentence in [languageCode] demonstrating capitalization and punctuation, or null

@@ -1554,6 +1554,7 @@ object DictateController {
                     // Non-chat: style/punctuation prompt biases recognition (roadmap 2.4 / 4.11).
                     // Chat-audio: the full instruction (language + style + all auto-formatting) in one go.
                     prompt = if (chatAudio) buildChatAudioInstruction(appContext) else transcriptionStylePrompt(),
+                    customVocabulary = DictatePromptDefaults.parseCustomWords(prefs.dictate.customWords.get()),
                 )
                 val providerStartedNanos = SystemClock.elapsedRealtimeNanos()
                 val result = if (preset.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE) {
@@ -1970,6 +1971,7 @@ object DictateController {
                 RealtimeClient.open(
                     api!!, account.apiKey, model, language, callbacks,
                     baseUrl = baseUrlOverrideFor(account).takeIf { presetFor(account).isCustom },
+                    customVocabulary = DictatePromptDefaults.parseCustomWords(prefs.dictate.customWords.get()),
                 )
             }
         }.getOrElse { realtimeFailed = true; null } ?: return null
@@ -2332,7 +2334,11 @@ object DictateController {
             null
         }
         val request = TranscriptionRequest(
-            audioFile = packed ?: toUpload, model = model, language = language, prompt = prompt,
+            audioFile = packed ?: toUpload,
+            model = model,
+            language = language,
+            prompt = prompt,
+            customVocabulary = DictatePromptDefaults.parseCustomWords(prefs.dictate.customWords.get()),
         )
         return try {
             val result = if (preset.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE) {

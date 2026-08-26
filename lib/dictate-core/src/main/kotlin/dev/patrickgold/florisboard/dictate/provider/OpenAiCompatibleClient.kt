@@ -53,10 +53,9 @@ import javax.net.ssl.X509TrustManager
  * a few headers (see [ProviderRegistry] and [ProviderConfig]).
  *
  * Google Gemini is also handled here: chat/rewording goes through its OpenAI-compatible layer
- * unchanged, while transcription uses the native generateContent endpoint (see
- * [transcribeGeminiGenerateContent]). Providers with a genuinely different chat API (e.g. Anthropic
- * native) would still need their own [LlmProvider] implementation; until then they are reachable via
- * OpenRouter.
+ * unchanged, dedicated transcription uses Files + Interactions, and older multimodal transcription
+ * models keep using native generateContent. Providers with a genuinely different chat API (e.g.
+ * Anthropic native) would still need their own [LlmProvider] implementation.
  */
 class OpenAiCompatibleClient(
     private val config: ProviderConfig,
@@ -161,6 +160,7 @@ class OpenAiCompatibleClient(
         TranscriptionApi.OPENAI_MULTIPART -> transcribeMultipart(request, onRetry)
         TranscriptionApi.OPENROUTER_MULTIPART -> transcribeOpenRouterMultipart(request, onRetry)
         TranscriptionApi.SONIOX_ASYNC -> transcribeSonioxAsync(request, onRetry)
+        TranscriptionApi.GEMINI_INTERACTIONS -> transcribeGemini(request, onRetry)
         TranscriptionApi.GEMINI_GENERATE_CONTENT -> transcribeGeminiGenerateContent(request, onRetry)
         TranscriptionApi.ELEVENLABS_MULTIPART -> transcribeElevenLabs(request, onRetry)
         TranscriptionApi.DEEPGRAM -> transcribeDeepgram(request, onRetry)
@@ -595,12 +595,145 @@ class OpenAiCompatibleClient(
         }
     }
 
+    /** Routes the dedicated Gemini 3.5 STT model to Interactions and preserves older explicit choices. */
+    private suspend fun transcribeGemini(
+        request: TranscriptionRequest,
+        onRetry: (attempt: Int) -> Unit,
+    ): TranscriptionResult = if (request.model.removePrefix("models/") == GEMINI_TRANSCRIBE_MODEL) {
+        transcribeGeminiInteractions(request, onRetry)
+    } else {
+        transcribeGeminiGenerateContent(request, onRetry)
+    }
+
     /**
-     * Google Gemini transcription. Gemini exposes no speech-to-text endpoint; its multimodal models
-     * transcribe audio sent as base64 `inline_data` to the native `generateContent` endpoint (the
-     * OpenAI-compatible layer used for chat does not accept audio). We give the model a strict instruction
-     * to emit only the verbatim transcript – and nothing at all for silence – so the output can be used
-     * directly and won't echo the style hint or hallucinate on empty audio.
+     * Gemini 3.5 Transcribe file flow:
+     *  1. start and finalize a resumable Files API upload,
+     *  2. pass its URI to the Interactions API,
+     *  3. extract text from model-output steps,
+     *  4. delete the temporary remote file on every completed/error path.
+     */
+    private suspend fun transcribeGeminiInteractions(
+        request: TranscriptionRequest,
+        onRetry: (attempt: Int) -> Unit,
+    ): TranscriptionResult {
+        val uploaded = uploadGeminiFile(request.audioFile, onRetry)
+        try {
+            val languageCodes = geminiTranscriptionLanguageCode(request.language)?.let { listOf(it) }
+                ?: emptyList()
+            val vocabulary = request.customVocabulary.asSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .take(GEMINI_CUSTOM_VOCABULARY_LIMIT)
+                .toList()
+            val dto = GeminiInteractionRequestDto(
+                model = GEMINI_TRANSCRIBE_MODEL,
+                input = listOf(
+                    GeminiInteractionAudioDto(
+                        uri = uploaded.uri,
+                        mimeType = uploaded.mimeType,
+                    ),
+                ),
+                generationConfig = GeminiInteractionGenerationConfigDto(
+                    transcriptionConfig = GeminiTranscriptionConfigDto(
+                        languageCodes = languageCodes,
+                        customVocabulary = vocabulary.ifEmpty { null },
+                    ),
+                ),
+            )
+            val httpRequest = Request.Builder()
+                .url(geminiNativeBaseUrl() + "interactions")
+                .headers(geminiNativeHeaders())
+                .post(
+                    json.encodeToString(GeminiInteractionRequestDto.serializer(), dto)
+                        .toRequestBody(JSON_MEDIA_TYPE),
+                )
+                .build()
+            val body = executeForBody(httpRequest, onRetry = onRetry)
+            val response = decode(GeminiInteractionResponseDto.serializer(), body)
+            if (response.status == "failed") {
+                throw DictateApiException(
+                    DictateApiException.Kind.UNKNOWN,
+                    response.error?.message ?: "Gemini transcription failed",
+                )
+            }
+            val text = response.outputText?.takeIf { it.isNotBlank() }
+                ?: response.steps.asSequence()
+                    .flatMap { it.content.asSequence() }
+                    .mapNotNull { it.text }
+                    .joinToString("")
+            return TranscriptionResult(text.trim())
+        } finally {
+            deleteGeminiFile(uploaded.name)
+        }
+    }
+
+    /** Uploads one audio file with Google's documented two-request resumable Files API protocol. */
+    private suspend fun uploadGeminiFile(
+        audioFile: File,
+        onRetry: (attempt: Int) -> Unit,
+    ): GeminiFileDto {
+        val mediaType = guessGeminiAudioMediaType(audioFile)
+        val metadata = json.encodeToString(
+            GeminiFileUploadStartDto.serializer(),
+            GeminiFileUploadStartDto(GeminiFileMetadataDto(displayName = audioFile.name)),
+        )
+        val startRequest = Request.Builder()
+            .url(geminiUploadUrl())
+            .headers(geminiNativeHeaders())
+            .header("X-Goog-Upload-Protocol", "resumable")
+            .header("X-Goog-Upload-Command", "start")
+            .header("X-Goog-Upload-Header-Content-Length", audioFile.length().toString())
+            .header("X-Goog-Upload-Header-Content-Type", mediaType.toString())
+            .post(metadata.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+        val start = executeForResponse(startRequest, onRetry = onRetry)
+        val uploadUrl = start.headers["X-Goog-Upload-URL"]
+            ?: throw DictateApiException(
+                DictateApiException.Kind.UNKNOWN,
+                "Gemini Files API did not return an upload URL",
+            )
+
+        val uploadRequest = Request.Builder()
+            .url(uploadUrl)
+            .header("Content-Length", audioFile.length().toString())
+            .header("X-Goog-Upload-Offset", "0")
+            .header("X-Goog-Upload-Command", "upload, finalize")
+            .post(audioFile.asRequestBody(mediaType))
+            .build()
+        val response = decode(
+            GeminiFileUploadResponseDto.serializer(),
+            executeForBody(uploadRequest, onRetry = onRetry),
+        ).file
+        if (response.name.isBlank() || response.uri.isBlank()) {
+            throw DictateApiException(
+                DictateApiException.Kind.UNKNOWN,
+                "Gemini Files API returned incomplete file metadata",
+            )
+        }
+        return response.copy(mimeType = response.mimeType.ifBlank { mediaType.toString() })
+    }
+
+    /** Uploaded Gemini files otherwise persist for 48 hours; cleanup is best-effort after a normal call. */
+    private suspend fun deleteGeminiFile(name: String) {
+        if (name.isBlank()) return
+        val request = Request.Builder()
+            .url(geminiNativeBaseUrl() + name.removePrefix("/"))
+            .headers(geminiNativeHeaders())
+            .delete()
+            .build()
+        try {
+            executeForBody(request, maxRetries = 0)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Throwable) {
+            // The file expires automatically; cleanup must never replace a successful transcript/error.
+        }
+    }
+
+    /**
+     * Legacy Gemini transcription for general multimodal models. Audio is base64-inlined in a native
+     * generateContent call; retained so existing explicit Gemini Flash/Pro selections keep working.
      */
     private suspend fun transcribeGeminiGenerateContent(
         request: TranscriptionRequest,
@@ -655,6 +788,10 @@ class OpenAiCompatibleClient(
 
     /** Native Gemini base URL (`.../v1beta/`) derived from the OpenAI-compat base (`.../v1beta/openai/`). */
     private fun geminiNativeBaseUrl(): String = config.normalizedBaseUrl.removeSuffix("openai/")
+
+    /** Files uploads use `/upload/v1beta/files`, alongside (not below) the native `/v1beta/` root. */
+    private fun geminiUploadUrl(): String =
+        geminiNativeBaseUrl().removeSuffix("v1beta/") + "upload/v1beta/files"
 
     /** Gemini's native API authenticates via the `x-goog-api-key` header rather than a bearer token. */
     private fun geminiNativeHeaders(): Headers {
@@ -735,7 +872,8 @@ class OpenAiCompatibleClient(
         val response = decode(ModelsResponseDto.serializer(), body)
         // Gemini's catalog reports ids as `models/gemini-…`; strip that prefix so the picker shows clean
         // ids that also work directly as the `model` field in both chat and generateContent calls.
-        val stripPrefix = config.transcriptionApi == TranscriptionApi.GEMINI_GENERATE_CONTENT
+        val stripPrefix = config.transcriptionApi == TranscriptionApi.GEMINI_INTERACTIONS ||
+            config.transcriptionApi == TranscriptionApi.GEMINI_GENERATE_CONTENT
         return response.data
             .map {
                 ModelInfo(
@@ -795,7 +933,15 @@ class OpenAiCompatibleClient(
         maxRetries: Int = 3,
         onRetry: (attempt: Int) -> Unit = {},
         diagnosticLabel: String? = null,
-    ): String {
+    ): String = executeForResponse(request, maxRetries, onRetry, diagnosticLabel).body
+
+    /** Same retry/cancellation policy as [executeForBody], retaining response headers for upload setup. */
+    private suspend fun executeForResponse(
+        request: Request,
+        maxRetries: Int = 3,
+        onRetry: (attempt: Int) -> Unit = {},
+        diagnosticLabel: String? = null,
+    ): HttpResponseData {
         var attempt = 0
         while (true) {
             val startedNanos = System.nanoTime()
@@ -845,7 +991,7 @@ class OpenAiCompatibleClient(
      * still be billed even though the UI already returned to idle (issue #192). Throws
      * [DictateApiException] on non-2xx and [IOException] on transport errors.
      */
-    private suspend fun executeOnce(request: Request): String = suspendCancellableCoroutine { cont ->
+    private suspend fun executeOnce(request: Request): HttpResponseData = suspendCancellableCoroutine { cont ->
         val call = client.newCall(request)
         cont.invokeOnCancellation { runCatching { call.cancel() } }
         call.enqueue(object : Callback {
@@ -866,7 +1012,7 @@ class OpenAiCompatibleClient(
                                 type = error?.type,
                             )
                         }
-                        body
+                        HttpResponseData(body = body, headers = resp.headers)
                     }
                 }
                 if (!cont.isActive) return // cancelled while reading — drop the result
@@ -877,6 +1023,8 @@ class OpenAiCompatibleClient(
             }
         })
     }
+
+    private data class HttpResponseData(val body: String, val headers: Headers)
 
     /**
      * Reads a response that succeeded. Decoding happens *after* [executeForBody], outside the catch that
@@ -982,6 +1130,15 @@ class OpenAiCompatibleClient(
         }
         return type.toMediaType()
     }
+
+    /** MIME names accepted by the Interactions audio input differ slightly from general multipart APIs. */
+    private fun guessGeminiAudioMediaType(file: File): MediaType = when (file.extension.lowercase()) {
+        "aif", "aiff" -> "audio/aiff"
+        "aac" -> "audio/aac"
+        "m4a", "mp4" -> "audio/m4a"
+        "opus" -> "audio/opus"
+        else -> guessAudioMediaType(file).toString()
+    }.toMediaType()
 
     /**
      * Maps a file to one of OpenRouter's accepted `format` strings (wav, mp3, flac, m4a, ogg, webm,
@@ -1148,6 +1305,73 @@ class OpenAiCompatibleClient(
         val error: String? = null,
     )
 
+    // --- Gemini Files + Interactions DTOs (see transcribeGeminiInteractions) ---
+
+    @Serializable
+    private data class GeminiFileUploadStartDto(val file: GeminiFileMetadataDto)
+
+    @Serializable
+    private data class GeminiFileMetadataDto(
+        @SerialName("display_name") val displayName: String,
+    )
+
+    @Serializable
+    private data class GeminiFileUploadResponseDto(val file: GeminiFileDto = GeminiFileDto())
+
+    @Serializable
+    private data class GeminiFileDto(
+        val name: String = "",
+        val uri: String = "",
+        @SerialName("mimeType") val mimeType: String = "",
+    )
+
+    @Serializable
+    private data class GeminiInteractionRequestDto(
+        val model: String,
+        val input: List<GeminiInteractionAudioDto>,
+        @SerialName("generation_config")
+        val generationConfig: GeminiInteractionGenerationConfigDto,
+    )
+
+    @Serializable
+    private data class GeminiInteractionAudioDto(
+        val type: String = "audio",
+        val uri: String,
+        @SerialName("mime_type") val mimeType: String,
+    )
+
+    @Serializable
+    private data class GeminiInteractionGenerationConfigDto(
+        @SerialName("transcription_config")
+        val transcriptionConfig: GeminiTranscriptionConfigDto,
+    )
+
+    @Serializable
+    private data class GeminiTranscriptionConfigDto(
+        @SerialName("language_codes") val languageCodes: List<String> = emptyList(),
+        @SerialName("custom_vocabulary") val customVocabulary: List<String>? = null,
+    )
+
+    @Serializable
+    private data class GeminiInteractionResponseDto(
+        val status: String = "",
+        val steps: List<GeminiInteractionStepDto> = emptyList(),
+        @SerialName("output_text") val outputText: String? = null,
+        val error: ErrorBodyDto? = null,
+    )
+
+    @Serializable
+    private data class GeminiInteractionStepDto(
+        val type: String = "",
+        val content: List<GeminiInteractionContentDto> = emptyList(),
+    )
+
+    @Serializable
+    private data class GeminiInteractionContentDto(
+        val type: String = "",
+        val text: String? = null,
+    )
+
     // --- Gemini native generateContent DTOs (see transcribeGeminiGenerateContent) ---
 
     @Serializable
@@ -1269,6 +1493,8 @@ class OpenAiCompatibleClient(
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val RETRY_DELAY_MS = 3000L
+        private const val GEMINI_TRANSCRIBE_MODEL = "gemini-3.5-transcribe"
+        private const val GEMINI_CUSTOM_VOCABULARY_LIMIT = 1_000
         internal const val OPENROUTER_TRANSCRIPTION_MAX_RETRIES = 0
         private const val OPENROUTER_TRANSCRIPTION_TEMPERATURE = 0.0
         internal const val NETWORK_CONNECT_TIMEOUT_SECONDS = 8L

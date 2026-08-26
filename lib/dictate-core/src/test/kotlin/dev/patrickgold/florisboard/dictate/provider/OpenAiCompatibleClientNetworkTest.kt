@@ -309,4 +309,110 @@ class OpenAiCompatibleClientNetworkTest : FunSpec({
             server.takeRequest().getHeader("Authorization") shouldBe "Token test"
         }
     }
+
+    test("Gemini 3.5 Transcribe uploads audio and calls the Interactions API") {
+        ProviderRegistry.GEMINI.transcriptionApi shouldBe TranscriptionApi.GEMINI_INTERACTIONS
+        ProviderRegistry.GEMINI.defaultTranscriptionModel shouldBe "gemini-3.5-transcribe"
+        ProviderRegistry.GEMINI.supportsRealtime shouldBe true
+        ProviderRegistry.GEMINI.defaultRealtimeModel shouldBe "gemini-3.5-transcribe-live"
+
+        val audio = createTempFile(suffix = ".m4a").toFile().apply {
+            writeBytes("RIFF-gemini-audio".encodeToByteArray())
+        }
+        try {
+            MockWebServer().use { server ->
+                server.enqueue(
+                    MockResponse().setResponseCode(200)
+                        .addHeader("X-Goog-Upload-URL", server.url("/upload-session/42")),
+                )
+                server.enqueue(
+                    MockResponse().setResponseCode(200).setBody(
+                        """{"file":{"name":"files/test-file","uri":"https://files.test/audio","mimeType":"audio/m4a"}}""",
+                    ),
+                )
+                server.enqueue(
+                    MockResponse().setResponseCode(200).setBody(
+                        """{"status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"Hallo Gemini"}]}]}""",
+                    ),
+                )
+                server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+                val client = OpenAiCompatibleClient(
+                    ProviderConfig(
+                        baseUrl = server.url("/v1beta/openai/").toString(),
+                        apiKey = "gemini-key",
+                        transcriptionApi = TranscriptionApi.GEMINI_INTERACTIONS,
+                    ),
+                )
+
+                val result = client.transcribe(
+                    TranscriptionRequest(
+                        audioFile = audio,
+                        model = "gemini-3.5-transcribe",
+                        language = "de",
+                        customVocabulary = listOf("Immler", " Vier Höhen ", "Immler"),
+                    ),
+                )
+
+                val start = server.takeRequest()
+                val upload = server.takeRequest()
+                val interaction = server.takeRequest()
+                val cleanup = server.takeRequest()
+                result.text shouldBe "Hallo Gemini"
+                start.method shouldBe "POST"
+                start.path shouldBe "/upload/v1beta/files"
+                start.getHeader("x-goog-api-key") shouldBe "gemini-key"
+                start.getHeader("X-Goog-Upload-Protocol") shouldBe "resumable"
+                start.getHeader("X-Goog-Upload-Command") shouldBe "start"
+                start.body.readUtf8() shouldContain "\"display_name\":\"${audio.name}\""
+                upload.method shouldBe "POST"
+                upload.path shouldBe "/upload-session/42"
+                upload.getHeader("X-Goog-Upload-Command") shouldBe "upload, finalize"
+                upload.getHeader("Content-Type") shouldBe "audio/m4a"
+                upload.body.readUtf8() shouldBe "RIFF-gemini-audio"
+                interaction.method shouldBe "POST"
+                interaction.path shouldBe "/v1beta/interactions"
+                interaction.getHeader("x-goog-api-key") shouldBe "gemini-key"
+                interaction.body.readUtf8().let { body ->
+                    body shouldContain "\"model\":\"gemini-3.5-transcribe\""
+                    body shouldContain "\"uri\":\"https://files.test/audio\""
+                    body shouldContain "\"mime_type\":\"audio/m4a\""
+                    body shouldContain "\"language_codes\":[\"de-DE\"]"
+                    body shouldContain "\"custom_vocabulary\":[\"Immler\",\"Vier Höhen\"]"
+                }
+                cleanup.method shouldBe "DELETE"
+                cleanup.path shouldBe "/v1beta/files/test-file"
+                server.requestCount shouldBe 4
+            }
+        } finally {
+            audio.delete()
+        }
+    }
+
+    test("Gemini keeps generateContent for an older explicitly selected model") {
+        val audio = createTempFile(suffix = ".wav").toFile().apply {
+            writeBytes("RIFF-legacy".encodeToByteArray())
+        }
+        try {
+            MockWebServer().use { server ->
+                server.enqueue(
+                    MockResponse().setResponseCode(200).setBody(
+                        """{"candidates":[{"content":{"parts":[{"text":"legacy works"}]}}]}""",
+                    ),
+                )
+                val client = OpenAiCompatibleClient(
+                    ProviderConfig(
+                        baseUrl = server.url("/v1beta/openai/").toString(),
+                        apiKey = "test",
+                        transcriptionApi = TranscriptionApi.GEMINI_INTERACTIONS,
+                    ),
+                )
+
+                client.transcribe(TranscriptionRequest(audio, "gemini-2.5-flash")).text shouldBe "legacy works"
+                server.takeRequest().path shouldBe "/v1beta/models/gemini-2.5-flash:generateContent"
+                server.requestCount shouldBe 1
+            }
+        } finally {
+            audio.delete()
+        }
+    }
 })

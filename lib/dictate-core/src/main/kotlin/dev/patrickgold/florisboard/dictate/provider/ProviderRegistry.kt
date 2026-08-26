@@ -177,34 +177,31 @@ object ProviderRegistry {
         id = "gemini",
         displayName = "Google Gemini",
         // The OpenAI-compatible base URL serves chat/rewording and the live model catalog unchanged.
-        // Transcription instead uses Gemini's native generateContent endpoint, derived from this URL by
-        // dropping the trailing `openai/` (see TranscriptionApi.GEMINI_GENERATE_CONTENT).
+        // Dedicated transcription uses Gemini's native Files + Interactions APIs, derived from this URL.
         baseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/",
         capabilities = CHAT_AND_STT,
-        transcriptionApi = TranscriptionApi.GEMINI_GENERATE_CONTENT,
+        transcriptionApi = TranscriptionApi.GEMINI_INTERACTIONS,
         supportsDynamicModels = true,
         apiKeyUrl = "https://aistudio.google.com/app/apikey",
         defaultChatModel = "gemini-2.5-flash",
-        defaultTranscriptionModel = "gemini-2.5-flash",
+        defaultTranscriptionModel = "gemini-3.5-transcribe",
         // Stable, audio-capable Gemini models (verified June 2026; 2.0-flash was retired 2026-06-01). The
         // live picker merges any newer ones on top.
         curatedChatModels = listOf(
             "gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash-lite",
         ),
-        // Gemini has no dedicated STT model – its multimodal chat models double as transcription models, so
-        // the curated STT set mirrors the (cheaper, faster) flash chat models.
+        // Gemini 3.5 Transcribe is the dedicated Files + Interactions API model. Keep the older multimodal
+        // models as explicit compatibility choices; the client routes those through generateContent.
         curatedTranscriptionModels = listOf(
-            "gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro",
+            "gemini-3.5-transcribe", "gemini-2.5-flash", "gemini-3.5-flash",
+            "gemini-2.5-flash-lite", "gemini-2.5-pro",
         ),
-        // Realtime (#128): Live API (BidiGenerateContent) with input_audio_transcription. Live models are
-        // a distinct family — the exact id is verified when the Gemini Live session is built (later phase).
-        // Realtime disabled: the Live API connects but never acks `setup` (no setupComplete) with our
-        // config — the bidirectional Live protocol needs verified model id + setup shape (#128). Keep the
-        // wiring so it can be re-enabled once confirmed; until then Gemini uses batch transcription.
-        supportsRealtime = false,
+        // Dedicated Gemini Live transcription: 16 kHz PCM over BidiGenerateContent, with separate interim
+        // and finalized input-transcription events. The model id/setup shape were published 2026-08-26.
+        supportsRealtime = true,
         realtimeApi = RealtimeApi.GEMINI,
-        defaultRealtimeModel = "gemini-live-2.5-flash-preview",
-        curatedRealtimeModels = listOf("gemini-live-2.5-flash-preview"),
+        defaultRealtimeModel = "gemini-3.5-transcribe-live",
+        curatedRealtimeModels = listOf("gemini-3.5-transcribe-live"),
     )
 
     /**

@@ -60,7 +60,7 @@ data class ProviderConfig(
  * Wire format of a provider's speech-to-text endpoint. Most providers (OpenAI, Groq, Mistral, …) accept
  * the OpenAI `multipart/form-data` file upload at `audio/transcriptions`. OpenRouter currently accepts
  * that same fast wire format and has a documented JSON fallback; it keeps a dedicated enum value because
- * its catalog and retry policy also differ. Soniox uses a multi-step async REST flow.
+ * its catalog and retry policy also differ. Soniox and Gemini use multi-step native REST flows.
  */
 enum class TranscriptionApi {
     /** OpenAI-style `multipart/form-data` upload with a `file` part. */
@@ -77,10 +77,16 @@ enum class TranscriptionApi {
     SONIOX_ASYNC,
 
     /**
-     * Google Gemini has no dedicated speech-to-text endpoint and its OpenAI-compatible layer (used for
-     * chat/rewording) does not accept audio. Instead the audio is base64-inlined into a single
-     * `POST {baseUrl}/../models/{model}:generateContent` call against the native Gemini API, instructing
-     * the multimodal model to emit only the verbatim transcript. See [OpenAiCompatibleClient].
+     * Gemini's dedicated speech-to-text flow: upload audio through the Files API, then pass the file URI
+     * to `POST /v1beta/interactions` with `gemini-3.5-transcribe`. Older multimodal Gemini models selected
+     * by an existing user remain supported through the generateContent compatibility path.
+     */
+    GEMINI_INTERACTIONS,
+
+    /**
+     * Legacy Google Gemini transcription for general multimodal models. Audio is base64-inlined into a
+     * native `generateContent` call and the model is instructed to return only the transcript. Kept for
+     * existing explicit model choices; new Gemini accounts default to [GEMINI_INTERACTIONS].
      */
     GEMINI_GENERATE_CONTENT,
 

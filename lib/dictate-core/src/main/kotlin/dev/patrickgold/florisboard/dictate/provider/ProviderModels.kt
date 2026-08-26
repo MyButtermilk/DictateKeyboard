@@ -96,6 +96,8 @@ data class TranscriptionRequest(
     val language: String? = null,
     /** Optional style/punctuation prompt to bias recognition. */
     val prompt: String? = null,
+    /** Provider-native vocabulary biasing terms, when supported. */
+    val customVocabulary: List<String> = emptyList(),
 )
 
 data class TranscriptionResult(

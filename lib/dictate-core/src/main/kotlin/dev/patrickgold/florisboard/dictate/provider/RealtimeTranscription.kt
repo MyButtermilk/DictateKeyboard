@@ -53,6 +53,8 @@ data class RealtimeRequest(
     val language: String? = null,
     /** Sample rate (Hz) of the mono 16-bit little-endian PCM the caller will send. */
     val sampleRate: Int = 16_000,
+    /** Provider-native vocabulary biasing terms, when supported. */
+    val customVocabulary: List<String> = emptyList(),
 )
 
 /**

@@ -134,15 +134,18 @@ fun ModelPickerDialog(
         ModelKind.CHAT -> preset.curatedChatModels
     }
     val candidates = remember(curated, fetched, audioModelIds, transcriptionModelIds, query, current) {
-        // Gemini transcribes via its multimodal chat models (no STT-tagged ids exist), so its live STT
-        // catalog is the chat catalog rather than the keyword-filtered subset.
-        val liveKind = if (preset.id == "gemini") ModelKind.CHAT else kind
+        // Gemini supports both the dedicated *-transcribe model and older multimodal chat models. Keep
+        // both families visible for transcription so an existing explicit model choice stays selectable.
+        val liveMatches: (String) -> Boolean = { id ->
+            matchesKind(id, kind) ||
+                (preset.id == "gemini" && kind == ModelKind.TRANSCRIPTION && matchesKind(id, ModelKind.CHAT))
+        }
         // For transcription, also include models the catalog flagged by MODALITY — both audio-input chat
         // models (#132) and dedicated STT models (#157) — so they surface even when the id doesn't match
         // the name heuristic (e.g. OpenRouter's mai-transcribe / parakeet / chirp).
         val audioForTranscription =
             if (kind == ModelKind.TRANSCRIPTION) audioModelIds + transcriptionModelIds else emptyList()
-        (curated + audioForTranscription + fetched.filter { matchesKind(it, liveKind) } + current)
+        (curated + audioForTranscription + fetched.filter(liveMatches) + current)
             .map { it.trim() }
             .filter { it.isNotEmpty() }
             .distinct()

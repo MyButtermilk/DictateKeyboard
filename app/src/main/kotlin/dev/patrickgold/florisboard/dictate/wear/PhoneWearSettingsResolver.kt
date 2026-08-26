@@ -72,6 +72,7 @@ object PhoneWearSettingsResolver {
             language = language,
             languageName = DictateLanguages.englishNameFor(prefs.dictate.activeInputLanguage.get()),
             stylePrompt = stylePrompt(prefs),
+            customVocabulary = DictatePromptDefaults.parseCustomWords(prefs.dictate.customWords.get()),
             // The watch is a keyboard, so mirror the *keyboard* accent (theme.accentColor, set on the
             // Theme screen) — not the separate settings-app accent (other.accentColor) — so the watch
             // matches what the user actually sees on the phone keyboard.
@@ -118,4 +119,3 @@ object PhoneWearSettingsResolver {
         return DictatePromptDefaults.appendCustomWords(base, prefs.dictate.customWords.get())
     }
 }
-

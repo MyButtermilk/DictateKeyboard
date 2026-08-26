@@ -41,7 +41,12 @@ object PhoneTranscriber {
         val model = account.transcriptionModel.ifBlank { preset.defaultTranscriptionModel ?: "" }
         val language = prefs.dictate.activeInputLanguage.get().takeIf { it != DictateLanguages.DETECT }
 
-        val request = TranscriptionRequest(audioFile = audio, model = model, language = language)
+        val request = TranscriptionRequest(
+            audioFile = audio,
+            model = model,
+            language = language,
+            customVocabulary = DictatePromptDefaults.parseCustomWords(prefs.dictate.customWords.get()),
+        )
 
         val transcript = if (preset.transcriptionApi == TranscriptionApi.LOCAL_ONDEVICE) {
             // The phone is configured for on-device STT: transcribe locally, no network/key needed.
